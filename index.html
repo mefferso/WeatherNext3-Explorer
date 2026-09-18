@@ -9,14 +9,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
-  <script src="https://ajax.googleapis.com/ajax/libs/earthengine/0.1.419/earthengine-api.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <header class="topbar">
     <div>
       <div class="eyebrow">GOOGLE DEEPMIND • EXPERIMENTAL GUIDANCE</div>
       <h1>WeatherNext 3 Explorer</h1>
-      <div class="subtitle">LIX-focused ensemble guidance • hourly initialization • up to 15 days</div>
+      <div class="subtitle">LIX-focused ensemble guidance • BigQuery surface statistics • hourly initialization</div>
     </div>
     <div class="top-actions">
       <div id="authBadge" class="status-badge offline"><span></span>Not connected</div>
@@ -59,6 +59,7 @@
           <button class="product" data-product="precip"><b>QPF</b><small>inches</small></button>
           <button class="product" data-product="mslp"><b>MSLP</b><small>hPa</small></button>
           <button class="product" data-product="qpfprob"><b>QPF Prob. Range</b><small>1-h threshold</small></button>
+          <button class="product" data-product="h500" disabled title="Requires raw GCS/Zarr full ensemble backend"><b>500-mb Height</b><small>GCS phase</small></button>
         </div>
       </section>
 
@@ -71,7 +72,7 @@
           <button data-hours="12">12 h</button>
           <button data-hours="24">24 h</button>
         </div>
-        <p class="microcopy">For multi-hour QPF, the explorer sums the ensemble-mean hourly precipitation. Summing hourly percentiles would not produce a valid accumulated percentile, so the statistic is locked to Mean.</p>
+        <p class="microcopy">Multi-hour QPF sums hourly ensemble-mean precipitation. The statistic is locked to Mean because summing hourly percentiles is not the accumulated-distribution percentile.</p>
       </section>
 
       <section id="probControls" class="panel hidden">
@@ -80,7 +81,7 @@
           <input id="qpfThreshold" type="number" min="0.01" max="5" step="0.05" value="0.25">
           <span>in</span>
         </div>
-        <p class="microcopy">Probability is shown as a range inferred directly from WN3's P10/P25/P50/P75/P90 fields. It is not an invented exact percentage.</p>
+        <p class="microcopy">Probability is shown as a defensible range inferred from WN3 P10/P25/P50/P75/P90, not an invented exact percentage.</p>
       </section>
 
       <section class="panel">
@@ -95,17 +96,17 @@
       </section>
 
       <section class="panel science-note">
-        <div class="panel-title">500-mb heights</div>
-        <p>WeatherNext 3 atmospheric pressure-level fields are only in the full 64-member GCS/Zarr dataset, not Earth Engine. This browser build deliberately does <b>not</b> fake them from surface data. A raw-ensemble backend is the next phase.</p>
+        <div class="panel-title">Data path</div>
+        <p><b>Surface maps:</b> WeatherNext 3 BigQuery linked dataset — no Earth Engine registration required.<br><br><b>Next phase:</b> raw 64-member GCS/Zarr for 500-mb fields and exact member-count probabilities.</p>
       </section>
     </aside>
 
     <section class="map-wrap">
       <div id="map"></div>
-      <div id="loading" class="loading hidden"><div class="spinner"></div><span>Building WeatherNext layer…</span></div>
+      <div id="loading" class="loading hidden"><div class="spinner"></div><span>Querying WeatherNext 3…</span></div>
       <div id="message" class="message-card">
         <b>Setup required</b>
-        <span>Connect the Google account that was approved for WeatherNext access.</span>
+        <span>Connect your approved Google account to the WeatherNext BigQuery linked dataset.</span>
         <button id="messageSetupBtn" class="primary-btn">Open setup</button>
       </div>
 
@@ -118,7 +119,7 @@
 
       <div id="pointReadout" class="point-readout hidden">
         <button id="readoutClose" aria-label="Close">×</button>
-        <div class="readout-kicker">POINT FORECAST</div>
+        <div class="readout-kicker">GRIDPOINT</div>
         <div id="readoutLocation" class="readout-location"></div>
         <div id="readoutValue" class="readout-value"></div>
         <div id="readoutMeta" class="readout-meta"></div>
@@ -132,9 +133,12 @@
         <div><div class="eyebrow">ONE-TIME BROWSER SETUP</div><h2>Connect WeatherNext 3</h2></div>
         <button class="icon-btn" value="cancel" aria-label="Close">×</button>
       </div>
-      <p>This app runs entirely in your browser. Your Google sign-in token is handled by Google's Earth Engine client; no private key is stored in this repo.</p>
+      <p>This version uses the WeatherNext 3 <b>BigQuery Analytics Hub linked dataset</b>, bypassing Earth Engine registration. OAuth happens in your browser; no private key is stored in this repo.</p>
       <label>Google Cloud project ID
-        <input id="projectId" autocomplete="off" placeholder="example: my-weather-project" required>
+        <input id="projectId" autocomplete="off" placeholder="weathernext3-explorer" required>
+      </label>
+      <label>BigQuery linked dataset ID
+        <input id="datasetId" autocomplete="off" placeholder="example: weathernext3" required>
       </label>
       <label>OAuth 2.0 Web Client ID
         <input id="clientId" autocomplete="off" placeholder="123456789-abc.apps.googleusercontent.com" required>
@@ -143,12 +147,13 @@
         <input id="mapsKey" autocomplete="off" placeholder="AIza…" required>
       </label>
       <div class="setup-help">
-        <b>Cloud setup checklist</b>
+        <b>BigQuery setup checklist</b>
         <ol>
-          <li>Use a Google Cloud project with the Earth Engine API enabled.</li>
-          <li>Create an OAuth Web Client ID and add this GitHub Pages URL to Authorized JavaScript origins.</li>
-          <li>Enable Maps JavaScript API and restrict the Maps key to this site's HTTP referrer.</li>
-          <li>Sign in below with the same Google account approved for WeatherNext.</li>
+          <li>Enable the BigQuery API in this Cloud project.</li>
+          <li>Subscribe to the approved WeatherNext 3 Analytics Hub listing and create a linked dataset in this project.</li>
+          <li>Enter that linked dataset's ID above (the dataset containing <code>weathernext_3_0_0_0p1deg</code>).</li>
+          <li>The existing OAuth Web Client origin should include <code>https://mefferso.github.io</code>.</li>
+          <li>Sign in with the same Google account approved for WeatherNext.</li>
         </ol>
       </div>
       <div class="dialog-actions">
@@ -160,7 +165,7 @@
   </dialog>
 
   <footer>
-    Experimental model guidance — not an official NWS forecast or warning. WeatherNext data © 2026 DeepMind Technologies Limited; see dataset terms and attribution requirements.
+    Experimental model guidance — not an official NWS forecast or warning. Historical data: CC BY 4.0; real-time data subject to GDM WeatherNext experimental terms.
   </footer>
   <script src="app.js"></script>
 </body>
