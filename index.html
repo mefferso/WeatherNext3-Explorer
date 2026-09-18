@@ -20,7 +20,7 @@
     </div>
     <div class="top-actions">
       <div id="authBadge" class="status-badge offline"><span></span>Not connected</div>
-      <button id="settingsBtn" class="ghost-btn" type="button">Setup</button>
+      <button id="settingsBtn" class="ghost-btn" type="button" onclick="document.getElementById('setupDialog').showModal()">Setup</button>
     </div>
   </header>
 
@@ -106,7 +106,7 @@
       <div id="message" class="message-card">
         <b>Setup required</b>
         <span>Connect the Google account approved for WeatherNext access.</span>
-        <button id="messageSetupBtn" class="primary-btn">Open setup</button>
+        <button id="messageSetupBtn" class="primary-btn" type="button" onclick="document.getElementById('setupDialog').showModal()">Open setup</button>
       </div>
 
       <div id="legend" class="legend hidden">
@@ -163,6 +163,6 @@
   <footer>
     Experimental model guidance — not an official NWS forecast or warning. Historical WeatherNext data is CC BY 4.0; real-time data is subject to Google DeepMind WeatherNext experimental terms.
   </footer>
-  <script src="app.js"></script>
+  <script src="app.js?v=20260918-1748"></script>
 </body>
 </html>
