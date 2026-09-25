@@ -7,6 +7,7 @@ const LIX_CENTER={lat:30.25,lng:-90.2};
 const LIX_ZOOM=7;
 const MAX_LAYER_CACHE=20;
 const MAX_TREND_RUNS=16;
+const RUN_HOURS_CACHE_MS=120000;
 
 const palettes={
   temp:['#4b0082','#3521b5','#2456d4','#1f8be0','#37b8df','#70d4c3','#a8df91','#e5e873','#ffd34e','#ffab43','#f47a3e','#e54735','#b5152c'],
@@ -154,11 +155,12 @@ function connectionError(err){
 
 function baseRunCollection(run=els.runSelect.value){return ee.ImageCollection(DATASET).filter(ee.Filter.eq('start_time',run))}
 async function getRunHours(run){
-  if(runHoursCache.has(run))return runHoursCache.get(run);
+  const cached=runHoursCache.get(run);
+  if(cached&&Date.now()-cached.at<RUN_HOURS_CACHE_MS)return cached.hours;
   const hours=await evaluatePromise(ee.List(baseRunCollection(run).aggregate_array('forecast_hour')).distinct().sort());
   const parsed=(hours||[]).map(Number).filter(Number.isFinite).sort((a,b)=>a-b);
   if(!parsed.length)throw new Error('No forecast-hour images are available for '+formatRun(run)+'.');
-  runHoursCache.set(run,parsed);
+  runHoursCache.set(run,{hours:parsed,at:Date.now()});
   return parsed;
 }
 async function loadRuns(){
@@ -479,12 +481,15 @@ function updateLegend(meta=currentLayerMeta,display=meta?prepareDisplay(meta,cur
 }
 function layerStatusText(meta){
   const p=PRODUCTS[meta.product],valid=currentValidDate(meta.run,meta.fh);
-  const detail=meta.product==='precip'?(meta.accumHours+'-h QPF • '+meta.statLabel):meta.statLabel;
-  if(!meta.comparison)return formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • '+detail;
+  let detail=meta.statLabel;
+  if(meta.product==='precip')detail=meta.accumHours+'-h QPF • '+meta.statLabel;
+  if(meta.product==='qpfprob')detail='QPF probability range > '+meta.thresholdIn.toFixed(2)+' in';
+  if(!meta.comparison)return formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • '+p.title+' • '+detail;
+  const field=p.title+' • '+meta.statLabel+' • Δ '+p.unit;
   if(meta.compareMode==='same_valid'){
-    return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' • Valid '+formatValid(valid)+' • Same valid time • '+p.unit;
+    return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' • Valid '+formatValid(valid)+' • Same valid time • '+field;
   }
-  return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' (Valid '+formatValid(valid)+') − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' (Valid '+formatValid(meta.compareValid)+') • Same forecast lead • '+p.unit;
+  return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' (Valid '+formatValid(valid)+') − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' (Valid '+formatValid(meta.compareValid)+') • Same forecast lead • '+field;
 }
 function updateLayerStatus(meta){els.layerStatus.textContent=layerStatusText(meta);els.layerStatus.classList.remove('muted')}
 
@@ -597,7 +602,7 @@ async function openMeteogram(){
 }
 function trendCollection(meta,point,targetValid){
   const p=PRODUCTS[meta.product],start=new Date(targetValid.getTime()),end=new Date(targetValid.getTime()+60000);
-  const collection=ee.ImageCollection(DATASET).filterDate(start,end).filter(ee.Filter.inList('start_time',availableRuns.slice(0,24))).sort('start_time');
+  const collection=ee.ImageCollection(DATASET).filterDate(ee.Date(start.getTime()),ee.Date(end.getTime())).filter(ee.Filter.inList('start_time',availableRuns.slice(0,24))).sort('start_time');
   const list=collection.toList(collection.size());
   let bands;
   if(isSpreadStat(meta.stat)){
