@@ -10,6 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/earthengine/0.1.419/earthengine-api.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -33,7 +34,7 @@
         </label>
         <div class="lead-row">
           <label class="grow">Forecast hour
-            <input id="fhRange" type="range" min="1" max="48" value="12" disabled>
+            <input id="fhRange" type="range" min="0" max="47" value="11" disabled>
           </label>
           <input id="fhNumber" class="fh-number" type="number" min="1" max="48" value="12" disabled>
         </div>
@@ -46,8 +47,27 @@
             <option value="p50">Median (P50)</option>
             <option value="p75">P75</option>
             <option value="p90">P90</option>
+            <option value="spread_iqr">P75–P25 spread</option>
+            <option value="spread_p80">P90–P10 spread</option>
           </select>
         </label>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">Run comparison</div>
+        <label class="toggle-row"><input id="compareToggle" type="checkbox"> Difference map</label>
+        <div id="compareControls" class="hidden">
+          <label>Comparison run
+            <select id="compareRun"></select>
+          </label>
+          <label>Comparison type
+            <select id="compareMode">
+              <option value="same_valid">Same valid time</option>
+              <option value="same_lead">Same forecast lead</option>
+            </select>
+          </label>
+          <p id="compareHint" class="microcopy"></p>
+        </div>
       </section>
 
       <section class="panel">
@@ -71,7 +91,7 @@
           <button data-hours="12">12 h</button>
           <button data-hours="24">24 h</button>
         </div>
-        <p class="microcopy">For multi-hour QPF, the explorer sums ensemble-mean hourly precipitation. Summing hourly percentiles would not produce a valid accumulated percentile, so the statistic is locked to Mean.</p>
+        <p class="microcopy">Multi-hour QPF sums ensemble-mean hourly precipitation only when every required forecast hour exists.</p>
       </section>
 
       <section id="probControls" class="panel hidden">
@@ -95,13 +115,14 @@
       </section>
 
       <section class="panel science-note">
-        <div class="panel-title">Next phase</div>
-        <p>Surface fields use Earth Engine now. The raw 64-member GCS/Zarr dataset is still the right path for 500-mb heights, pressure-level fields, and exact member-count probabilities.</p>
+        <div class="panel-title">Earth Engine phase</div>
+        <p>Surface maps, percentile spreads, run differences, point meteograms, and run trends use Earth Engine summary statistics. Raw members and pressure-level fields remain reserved for the later GCS/Zarr phase.</p>
       </section>
     </aside>
 
     <section class="map-wrap">
       <div id="map"></div>
+      <div id="layerStatus" class="layer-status muted">Layer status —</div>
       <div id="loading" class="loading hidden"><div class="spinner"></div><span>Building WeatherNext layer…</span></div>
       <div id="message" class="message-card">
         <b>Setup required</b>
@@ -118,11 +139,25 @@
       </div>
 
       <div id="pointReadout" class="point-readout hidden">
-        <button id="readoutClose" aria-label="Close">×</button>
+        <button id="readoutClose" class="readout-close" aria-label="Close">×</button>
         <div class="readout-kicker">POINT FORECAST</div>
         <div id="readoutLocation" class="readout-location"></div>
         <div id="readoutValue" class="readout-value"></div>
         <div id="readoutMeta" class="readout-meta"></div>
+        <div class="readout-actions">
+          <button id="meteogramBtn" class="mini-btn" disabled>Meteogram</button>
+          <button id="trendBtn" class="mini-btn" disabled>Run trend</button>
+        </div>
+      </div>
+
+      <div id="analysisPanel" class="analysis-panel hidden">
+        <button id="analysisClose" class="analysis-close" aria-label="Close analysis">×</button>
+        <div class="readout-kicker">POINT ANALYSIS</div>
+        <div id="analysisTitle" class="analysis-title"></div>
+        <div id="analysisMeta" class="analysis-meta"></div>
+        <div id="analysisLoading" class="analysis-loading"><div class="spinner"></div><span>Loading Earth Engine time series…</span></div>
+        <div id="analysisError" class="analysis-error hidden"></div>
+        <div class="chart-wrap"><canvas id="analysisChart"></canvas></div>
       </div>
     </section>
   </main>
@@ -164,6 +199,6 @@
   <footer>
     Experimental model guidance — not an official NWS forecast or warning. Historical WeatherNext data is CC BY 4.0; real-time data is subject to Google DeepMind WeatherNext experimental terms.
   </footer>
-  <script src="app.js?v=20260925-phase1"></script>
+  <script src="app.js?v=20260925-phase2"></script>
 </body>
 </html>
