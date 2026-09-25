@@ -17,7 +17,8 @@ const palettes={
   mslp:['#54278f','#756bb1','#9e9ac8','#bcbddc','#d9d9d9','#f0f0c8','#f3d079','#eba45a','#df7649','#ca4d4d','#9e2f45'],
   qpfprob:['#607080','#62a5cf','#55c4b0','#d6d65c','#f2a444','#d94c43'],
   spread:['#f7fbff','#deebf7','#c6dbef','#9ecae1','#6baed6','#4292c6','#2171b5','#08519c','#08306b'],
-  difference:['#5b2a86','#3f51b5','#2879c7','#55a8d3','#a6cee3','#f7f7f7','#f6c49a','#ef8a62','#d95f4f','#b63a45','#7f1d35']
+  difference:['#5b2a86','#3f51b5','#2879c7','#55a8d3','#a6cee3','#f7f7f7','#f6c49a','#ef8a62','#d95f4f','#b63a45','#7f1d35'],
+  rawprob:['#16334a','#2f80b9','#48b7a0','#d6d65c','#f2a444','#d94c43']
 };
 
 const PROBABILITY_LABELS=['<10%','10–25%','25–50%','50–75%','75–90%','>90%'];
@@ -27,6 +28,10 @@ const WIND_THRESHOLDS=[0,5,10,15,20,25,30,35,40,50,64,80];
 const WIND_LABELS=['0–5','5–10','10–15','15–20','20–25','25–30','30–35','35–40','40–50','50–64','64–80','80+'];
 const SPREAD_MAX={temp:30,dewpoint:30,wind:40,mslp:20};
 const DIFF_RANGE={temp:20,dewpoint:20,wind:30,precip:5,mslp:30};
+const RAW_PROB_THRESHOLDS=[0,10,25,50,75,90,100.01];
+const RAW_PROB_LABELS=['0–10%','10–25%','25–50%','50–75%','75–90%','90–100%'];
+const MAX_RAW_RESPONSE_CACHE=12;
+const RAW_REQUEST_TIMEOUT_MS=180000;
 
 const PRODUCTS={
   temp:{title:'2-m Temperature',unit:'°F',band:'temperature_2m',min:0,max:110,transform:i=>i.subtract(273.15).multiply(9/5).add(32)},
@@ -34,22 +39,29 @@ const PRODUCTS={
   wind:{title:'10-m Wind Speed',unit:'kt',band:'wind_speed_10m',min:0,max:80,transform:i=>i.multiply(1.943844)},
   precip:{title:'QPF',unit:'in',band:'total_precipitation_1hr',min:0,max:5,transform:i=>i.multiply(39.3700787)},
   mslp:{title:'Mean Sea-Level Pressure',unit:'hPa',band:'mean_sea_level_pressure',min:940,max:1040,transform:i=>i.divide(100)},
-  qpfprob:{title:'1-h QPF Exceedance Probability Range',unit:'%',min:0,max:5}
+  qpfprob:{title:'1-h QPF Exceedance Probability Range',unit:'%',min:0,max:5},
+  h500:{title:'500-mb Height',unit:'dam',raw:true},
+  rawqpf:{title:'Raw-member QPF',unit:'%',raw:true}
 };
 
 let cfg=null,map=null,overlay=null,currentProduct='temp',currentImage=null,currentLayerMeta=null,accumHours=1,connected=false;
 let availableRuns=[],availableForecastHours=[],availableForecastHourSet=new Set();
 let renderSeq=0,forecastHourSeq=0,sampleSeq=0,analysisSeq=0;
 let selectedPoint=null,pointMarker=null,analysisChart=null;
+let rawIdToken=null,rawIdentityEmail='',rawIdentityInitialized=false,rawAbortController=null;
+let rawDataLayer=null,rawGroundOverlay=null,currentRawGrid=null;
 const runHoursCache=new Map();
 const layerCache=new Map();
+const rawResponseCache=new Map();
 
 const $=id=>document.getElementById(id);
 const els={
   authBadge:$('authBadge'),settingsBtn:$('settingsBtn'),setupDialog:$('setupDialog'),setupForm:$('setupForm'),
-  projectId:$('projectId'),clientId:$('clientId'),mapsKey:$('mapsKey'),clearConfigBtn:$('clearConfigBtn'),
+  projectId:$('projectId'),clientId:$('clientId'),mapsKey:$('mapsKey'),backendUrl:$('backendUrl'),clearConfigBtn:$('clearConfigBtn'),
   runSelect:$('runSelect'),fhRange:$('fhRange'),fhNumber:$('fhNumber'),validTime:$('validTime'),statSelect:$('statSelect'),
   compareToggle:$('compareToggle'),compareControls:$('compareControls'),compareRun:$('compareRun'),compareMode:$('compareMode'),compareHint:$('compareHint'),
+  rawControls:$('rawControls'),rawAuthStatus:$('rawAuthStatus'),rawSignInButton:$('rawSignInButton'),rawQpfControls:$('rawQpfControls'),
+  rawQpfMode:$('rawQpfMode'),rawAccum:$('rawAccum'),rawThresholdRow:$('rawThresholdRow'),rawThreshold:$('rawThreshold'),
   refreshBtn:$('refreshBtn'),homeBtn:$('homeBtn'),precipControls:$('precipControls'),probControls:$('probControls'),
   qpfThreshold:$('qpfThreshold'),opacityRange:$('opacityRange'),loading:$('loading'),message:$('message'),
   messageSetupBtn:$('messageSetupBtn'),layerStatus:$('layerStatus'),
@@ -63,12 +75,12 @@ const els={
 
 function getSavedConfig(){try{return JSON.parse(localStorage.getItem(CONFIG_KEY)||'null')}catch{return null}}
 function saveConfig(){
-  cfg={projectId:els.projectId.value.trim(),clientId:els.clientId.value.trim(),mapsKey:els.mapsKey.value.trim()};
+  cfg={projectId:els.projectId.value.trim(),clientId:els.clientId.value.trim(),mapsKey:els.mapsKey.value.trim(),backendUrl:els.backendUrl.value.trim().replace(/\/+$/,'')};
   localStorage.setItem(CONFIG_KEY,JSON.stringify(cfg));
 }
 function fillConfig(){
   const s=getSavedConfig()||{};
-  els.projectId.value=s.projectId||'';els.clientId.value=s.clientId||'';els.mapsKey.value=s.mapsKey||'';
+  els.projectId.value=s.projectId||'';els.clientId.value=s.clientId||'';els.mapsKey.value=s.mapsKey||'';els.backendUrl.value=s.backendUrl||'';
 }
 function setLoading(on,text='Building WeatherNext layer…'){els.loading.classList.toggle('hidden',!on);els.loading.querySelector('span').textContent=text}
 function showMessage(title,body,showSetup=true){
@@ -87,9 +99,10 @@ function accumButtons(){return Array.from(document.querySelectorAll('#accumGroup
 function isSpreadStat(stat){return stat==='spread_iqr'||stat==='spread_p80'}
 function spreadLabel(stat){return stat==='spread_iqr'?'P75–P25 percentile spread':'P90–P10 percentile spread'}
 function supportsSpread(product){return ['temp','dewpoint','wind','mslp'].includes(product)}
-function canCompare(product){return product!=='qpfprob'}
-function canMeteogram(meta){return meta&&['temp','dewpoint','wind','mslp','precip'].includes(meta.product)&&!meta.comparison}
-function canTrend(meta){return meta&&['temp','dewpoint','wind','mslp','precip'].includes(meta.product)&&!meta.comparison}
+function isRawProduct(product){return !!PRODUCTS[product]?.raw}
+function canCompare(product){return !['qpfprob','h500','rawqpf'].includes(product)}
+function canMeteogram(meta){return meta&&['temp','dewpoint','wind','mslp','precip'].includes(meta.product)&&!meta.comparison&&!meta.raw}
+function canTrend(meta){return meta&&['temp','dewpoint','wind','mslp','precip'].includes(meta.product)&&!meta.comparison&&!meta.raw}
 function convertRaw(product,v){
   if(v==null||!Number.isFinite(Number(v)))return null;
   const n=Number(v);
@@ -100,6 +113,250 @@ function convertRaw(product,v){
   return n;
 }
 function evaluatePromise(obj){return new Promise((resolve,reject)=>obj.evaluate((value,err)=>err?reject(err):resolve(value)))}
+
+
+function decodeJwtPayload(token){
+  try{
+    const part=token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+    return JSON.parse(decodeURIComponent(atob(part).split('').map(c=>'%'+('00'+c.charCodeAt(0).toString(16)).slice(-2)).join('')));
+  }catch{return null}
+}
+function rawTokenValid(){
+  if(!rawIdToken)return false;
+  const p=decodeJwtPayload(rawIdToken);
+  return !!p?.exp&&p.exp*1000>Date.now()+60000;
+}
+function prepareRawIdentity(){
+  if(!els.rawSignInButton)return;
+  cfg=getSavedConfig()||cfg||{};
+  if(!cfg?.backendUrl){
+    els.rawAuthStatus.textContent='Backend URL not configured in Setup.';
+    els.rawSignInButton.innerHTML='';
+    return;
+  }
+  if(rawTokenValid()){
+    els.rawAuthStatus.textContent='Raw backend signed in'+(rawIdentityEmail?' as '+rawIdentityEmail:'')+'.';
+    els.rawSignInButton.innerHTML='';
+    return;
+  }
+  rawIdToken=null;rawIdentityEmail='';
+  if(!window.google?.accounts?.id){
+    els.rawAuthStatus.textContent='Google backend sign-in is loading…';
+    return;
+  }
+  if(!rawIdentityInitialized){
+    google.accounts.id.initialize({
+      client_id:cfg.clientId,
+      callback:response=>{
+        rawIdToken=response.credential||null;
+        const p=decodeJwtPayload(rawIdToken||'');
+        rawIdentityEmail=p?.email||'';
+        prepareRawIdentity();
+        if(isRawProduct(currentProduct))renderLayer();
+      },
+      auto_select:false,
+      cancel_on_tap_outside:true
+    });
+    rawIdentityInitialized=true;
+  }
+  els.rawAuthStatus.textContent='Google sign-in is required for raw full-ensemble products.';
+  els.rawSignInButton.innerHTML='';
+  google.accounts.id.renderButton(els.rawSignInButton,{theme:'filled_black',size:'medium',shape:'pill',text:'signin_with'});
+}
+function rawCacheGet(key){
+  const v=rawResponseCache.get(key);
+  if(v){rawResponseCache.delete(key);rawResponseCache.set(key,v)}
+  return v||null;
+}
+function rawCacheSet(key,value){
+  if(rawResponseCache.has(key))rawResponseCache.delete(key);
+  rawResponseCache.set(key,value);
+  while(rawResponseCache.size>MAX_RAW_RESPONSE_CACHE)rawResponseCache.delete(rawResponseCache.keys().next().value);
+}
+function rawBbox(){
+  const b=map?.getBounds();if(!b)throw new Error('Map bounds are not ready yet.');
+  const sw=b.getSouthWest(),ne=b.getNorthEast();
+  let west=sw.lng(),east=ne.lng(),south=sw.lat(),north=ne.lat();
+  if(east<west)throw new Error('Raw products do not currently support a viewport crossing the dateline.');
+  west=Math.floor((west-.25)*4)/4;east=Math.ceil((east+.25)*4)/4;
+  south=Math.max(-90,Math.floor((south-.25)*4)/4);north=Math.min(90,Math.ceil((north+.25)*4)/4);
+  if(east-west>25||north-south>20)throw new Error('Raw WeatherNext requests are limited to a 25° × 20° regional view. Zoom in, then refresh.');
+  return [west,south,east,north];
+}
+async function fetchRaw(path,params){
+  cfg=getSavedConfig()||cfg||{};
+  if(!cfg?.backendUrl)throw Object.assign(new Error('Raw backend URL is not configured. Open Setup and add the Cloud Run service URL.'),{code:'backend_not_configured'});
+  if(!rawTokenValid())throw Object.assign(new Error('Sign in with Google in the Raw full-ensemble panel first.'),{code:'backend_sign_in_required'});
+  const url=new URL(cfg.backendUrl.replace(/\/+$/,'')+path);
+  Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,String(v)));
+  const key=url.toString();
+  const cached=rawCacheGet(key);if(cached)return {...cached,browserCache:'hit'};
+  if(rawAbortController)rawAbortController.abort();
+  const controller=new AbortController();rawAbortController=controller;
+  const timer=setTimeout(()=>controller.abort(),RAW_REQUEST_TIMEOUT_MS);
+  try{
+    const response=await fetch(url,{headers:{Authorization:'Bearer '+rawIdToken},signal:controller.signal});
+    let data=null;try{data=await response.json()}catch{}
+    if(!response.ok){
+      if(response.status===401){rawIdToken=null;rawIdentityEmail='';prepareRawIdentity()}
+      const err=new Error(data?.error?.message||('Raw backend returned HTTP '+response.status));
+      err.code=data?.error?.code||('http_'+response.status);throw err;
+    }
+    rawCacheSet(key,data);return data;
+  }catch(err){
+    if(err?.name==='AbortError')throw Object.assign(new Error('Raw backend request timed out or was superseded.'),{code:'backend_timeout'});
+    throw err;
+  }finally{
+    clearTimeout(timer);if(rawAbortController===controller)rawAbortController=null;
+  }
+}
+function syncRawControls(){
+  const raw=isRawProduct(currentProduct);
+  els.rawControls.classList.toggle('hidden',!raw);
+  els.rawQpfControls.classList.toggle('hidden',currentProduct!=='rawqpf');
+  els.rawThresholdRow.classList.toggle('hidden',currentProduct!=='rawqpf'||els.rawQpfMode.value!=='probability');
+  if(raw){
+    prepareRawIdentity();
+    const fh=getSelectedForecastHour();
+    Array.from(els.rawAccum.options).forEach(o=>{
+      const h=Number(o.value);o.disabled=fh==null||!isAccumulationAvailable(h,fh);
+    });
+    if(els.rawAccum.selectedOptions[0]?.disabled){
+      const first=Array.from(els.rawAccum.options).find(o=>!o.disabled);if(first)els.rawAccum.value=first.value;
+    }
+  }
+}
+function clearRawLayers(){
+  if(rawDataLayer){rawDataLayer.setMap(null);rawDataLayer=null}
+  if(rawGroundOverlay){rawGroundOverlay.setMap(null);rawGroundOverlay=null}
+  currentRawGrid=null;
+}
+function clearEeOverlay(){
+  if(overlay){const idx=map.overlayMapTypes.getArray().indexOf(overlay);if(idx>=0)map.overlayMapTypes.removeAt(idx);overlay=null}
+}
+function installRawContours(data){
+  clearEeOverlay();clearRawLayers();
+  rawDataLayer=new google.maps.Data();
+  rawDataLayer.addGeoJson({type:'FeatureCollection',features:data.features||[]});
+  rawDataLayer.setStyle(feature=>{
+    const level=Number(feature.getProperty('height_dam')),major=Math.abs(level%6)<0.01;
+    return {strokeColor:major?'#7ee7ff':'#d7f4ff',strokeWeight:major?2.3:1.15,strokeOpacity:major?0.95:0.68,clickable:false};
+  });
+  rawDataLayer.setMap(map);
+}
+function colorForRawProbability(v){
+  if(v==null||!Number.isFinite(Number(v))||Number(v)<=0)return null;
+  const n=Number(v);let idx=0;
+  for(let i=1;i<RAW_PROB_THRESHOLDS.length-1;i++)if(n>=RAW_PROB_THRESHOLDS[i])idx=i;
+  return palettes.rawprob[Math.min(idx,palettes.rawprob.length-1)];
+}
+function colorForRawQpf(v){
+  if(v==null||!Number.isFinite(Number(v))||Number(v)<QPF_THRESHOLDS[0])return null;
+  const n=Number(v);let idx=0;
+  for(let i=1;i<QPF_THRESHOLDS.length;i++)if(n>=QPF_THRESHOLDS[i])idx=i;
+  return palettes.precip[Math.min(idx,palettes.precip.length-1)];
+}
+function renderRawGrid(data,mode){
+  const lat=data.lat||[],lon=data.lon||[],values=data.values||[];
+  if(lat.length<2||lon.length<2||values.length!==lat.length)throw new Error('Raw backend returned an invalid grid.');
+  const cell=4,canvas=document.createElement('canvas');canvas.width=lon.length*cell;canvas.height=lat.length*cell;
+  const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.clearRect(0,0,canvas.width,canvas.height);
+  for(let i=0;i<lat.length;i++)for(let j=0;j<lon.length;j++){
+    const color=mode==='probability'?colorForRawProbability(values[i]?.[j]):colorForRawQpf(values[i]?.[j]);
+    if(!color)continue;ctx.fillStyle=color;ctx.fillRect(j*cell,(lat.length-1-i)*cell,cell,cell);
+  }
+  const res=Number(data.resolution_deg)||0.1;
+  const bounds={north:lat[lat.length-1]+res/2,south:lat[0]-res/2,east:lon[lon.length-1]+res/2,west:lon[0]-res/2};
+  clearEeOverlay();clearRawLayers();
+  rawGroundOverlay=new google.maps.GroundOverlay(canvas.toDataURL('image/png'),bounds,{opacity:parseFloat(els.opacityRange.value),clickable:false});
+  rawGroundOverlay.setMap(map);currentRawGrid=data;
+}
+function updateRawLegend(meta,data){
+  els.legend.classList.remove('hidden');
+  if(meta.product==='h500'){
+    els.legendTitle.textContent='500-mb Height • ensemble mean';
+    els.legendGradient.classList.add('hidden');els.legendDiscrete.classList.add('hidden');els.legendLabels.classList.add('hidden');
+    els.legendNote.textContent='3-dam contours • raw 64-member GCS/Zarr • 0.25° (~25 km) pressure-level grid • no artificial high-resolution interpolation';
+    return;
+  }
+  if(meta.rawQpfMode==='probability'){
+    setDiscreteLegend(palettes.rawprob,RAW_PROB_LABELS);
+    els.legendTitle.textContent='Exact '+meta.rawAccum+'-h QPF probability';
+    els.legendNote.textContent='All 64 members • QPF > '+Number(meta.rawThreshold).toFixed(2)+' in • exact member-count values binned only for map coloring';
+  }else{
+    setDiscreteLegend(palettes.precip,QPF_LABELS);
+    els.legendTitle.textContent='True accumulated QPF '+meta.rawQpfMode.toUpperCase();
+    els.legendNote.textContent=meta.rawAccum+'-h QPF • accumulate each of 64 members first, then compute '+meta.rawQpfMode.toUpperCase();
+  }
+}
+function updateRawStatus(meta,data){
+  const valid=currentValidDate(meta.run,meta.fh);
+  if(meta.product==='h500'){
+    els.layerStatus.textContent=formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • 500-mb Height • 64-member mean • raw GCS 0.25° • 3-dam contours';
+  }else if(meta.rawQpfMode==='probability'){
+    els.layerStatus.textContent=formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • '+meta.rawAccum+'-h QPF > '+Number(meta.rawThreshold).toFixed(2)+' in • exact 64-member probability • raw GCS 0.1°';
+  }else{
+    els.layerStatus.textContent=formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • '+meta.rawAccum+'-h QPF '+meta.rawQpfMode.toUpperCase()+' • true accumulated-member percentile • raw GCS 0.1°';
+  }
+  els.layerStatus.classList.remove('muted');
+}
+async function renderRawLayer(requestId,meta){
+  if(rawAbortController)rawAbortController.abort();
+  syncRawControls();
+  if(!cfg?.backendUrl){setLoading(false);showMessage('Raw backend not configured','Open Setup and add the Cloud Run backend URL after Phase 3 deployment.',true);return}
+  if(!rawTokenValid()){setLoading(false);showMessage('Raw backend sign-in required','Use the Google sign-in button in the Raw full-ensemble panel, then refresh the layer.',false);return}
+  let bbox;
+  try{bbox=rawBbox()}catch(err){setLoading(false);showMessage('Raw request region unavailable',escapeHtml(errorText(err)),false);return}
+  setLoading(true,meta.product==='h500'?'Loading raw 500-mb ensemble…':'Computing raw 64-member QPF…');
+  try{
+    let data;
+    if(meta.product==='h500'){
+      const hour=new Date(meta.run).getUTCHours();
+      if(![0,6,12,18].includes(hour))throw Object.assign(new Error('500-mb pressure-level fields are available only on 00/06/12/18 UTC runs.'),{code:'pressure_level_run_unavailable'});
+      data=await fetchRaw('/v1/field',{run:meta.run,fh:meta.fh,variable:'geopotential',level:500,bbox:bbox.join(',')});
+      if(requestId!==renderSeq)return;
+      installRawContours(data);
+    }else{
+      meta.rawAccum=Number(els.rawAccum.value);meta.rawQpfMode=els.rawQpfMode.value;meta.rawThreshold=Number(els.rawThreshold.value);
+      if(!isAccumulationAvailable(meta.rawAccum,meta.fh))throw Object.assign(new Error(meta.rawAccum+'-h raw QPF requires every forecast hour in the accumulation window.'),{code:'accumulation_unavailable'});
+      if(meta.rawQpfMode==='probability'){
+        data=await fetchRaw('/v1/probability',{run:meta.run,fh:meta.fh,accum_hours:meta.rawAccum,threshold_in:meta.rawThreshold,bbox:bbox.join(',')});
+        if(requestId!==renderSeq)return;renderRawGrid(data,'probability');
+      }else{
+        const pct=Number(meta.rawQpfMode.slice(1));
+        data=await fetchRaw('/v1/percentile',{run:meta.run,fh:meta.fh,accum_hours:meta.rawAccum,percentile:pct,bbox:bbox.join(',')});
+        if(requestId!==renderSeq)return;renderRawGrid(data,'percentile');
+      }
+    }
+    currentImage=null;currentLayerMeta={...meta,raw:true,rawData:data};hideMessage();setLoading(false);
+    updateRawLegend(currentLayerMeta,data);updateRawStatus(currentLayerMeta,data);syncPointActions();
+  }catch(err){
+    if(requestId!==renderSeq)return;
+    setLoading(false);prepareRawIdentity();
+    const title=err?.code==='backend_timeout'?'Raw backend timeout':err?.code==='backend_sign_in_required'?'Raw backend sign-in required':'Raw backend unavailable';
+    showMessage(title,escapeHtml(errorText(err)),false);
+  }
+}
+function nearestIndex(values,target){
+  let best=0,diff=Infinity;for(let i=0;i<values.length;i++){const d=Math.abs(Number(values[i])-target);if(d<diff){best=i;diff=d}}return best;
+}
+function sampleRawPoint(lat,lng){
+  markSelectedPoint(lat,lng);els.pointReadout.classList.remove('hidden');
+  els.readoutLocation.textContent=lat.toFixed(3)+', '+lng.toFixed(3);els.meteogramBtn.disabled=true;els.trendBtn.disabled=true;
+  const meta=currentLayerMeta;
+  if(meta.product==='h500'||!currentRawGrid){
+    els.readoutValue.textContent='Contour layer';els.readoutMeta.textContent='500-mb values are rendered as 3-dam contours from the 0.25° raw ensemble mean.';return;
+  }
+  const i=nearestIndex(currentRawGrid.lat,lat),j=nearestIndex(currentRawGrid.lon,lng),v=currentRawGrid.values?.[i]?.[j];
+  if(v==null){els.readoutValue.textContent='No data';els.readoutMeta.textContent='Raw grid cell is unavailable.';return}
+  if(meta.rawQpfMode==='probability'){
+    els.readoutValue.textContent=Number(v).toFixed(1)+'%';
+    els.readoutMeta.textContent=meta.rawAccum+'-h QPF > '+Number(meta.rawThreshold).toFixed(2)+' in • exact 64-member probability';
+  }else{
+    els.readoutValue.textContent=Number(v).toFixed(2)+' in';
+    els.readoutMeta.textContent=meta.rawAccum+'-h QPF '+meta.rawQpfMode.toUpperCase()+' • true accumulated-member percentile';
+  }
+}
 
 function loadGoogleMaps(key){
   return new Promise((resolve,reject)=>{
@@ -142,7 +399,7 @@ function initializeEE(){
     els.authBadge.classList.remove('offline');els.authBadge.classList.add('online');
     els.authBadge.innerHTML='<span></span>WeatherNext connected';
     els.runSelect.disabled=false;els.refreshBtn.disabled=false;
-    hideMessage();loadRuns();
+    hideMessage();prepareRawIdentity();loadRuns();
   },connectionError,null,cfg.projectId);
 }
 function connectionError(err){
@@ -265,6 +522,7 @@ function syncStatControl(){
   spreadOptions.forEach(o=>o.disabled=!supportsSpread(currentProduct));
   if(isSpreadStat(els.statSelect.value)&&!supportsSpread(currentProduct))els.statSelect.value='mean';
   if(!connected||!availableForecastHours.length){els.statSelect.disabled=true;return}
+  if(isRawProduct(currentProduct)){els.statSelect.value='mean';els.statSelect.disabled=true;return}
   if(currentProduct==='qpfprob'||(currentProduct==='precip'&&accumHours>1)){
     els.statSelect.value='mean';els.statSelect.disabled=true;
   }else els.statSelect.disabled=false;
@@ -292,6 +550,7 @@ function captureSelection(){
     run:els.runSelect.value,fh:getSelectedForecastHour(),product:currentProduct,stat,
     statLabel:isSpreadStat(stat)?spreadLabel(stat):(els.statSelect.options[els.statSelect.selectedIndex]?.text||stat),
     accumHours,thresholdIn:parseFloat(els.qpfThreshold.value)||0.25,
+    rawQpfMode:els.rawQpfMode.value,rawAccum:Number(els.rawAccum.value),rawThreshold:Number(els.rawThreshold.value),
     comparison:!!els.compareToggle.checked,compareRun:els.compareRun.value,compareMode:els.compareMode.value
   };
 }
@@ -388,6 +647,7 @@ function cacheMapId(key,mapId){
   while(layerCache.size>MAX_LAYER_CACHE)layerCache.delete(layerCache.keys().next().value);
 }
 function installOverlay(mapId){
+  clearRawLayers();
   if(overlay){const idx=map.overlayMapTypes.getArray().indexOf(overlay);if(idx>=0)map.overlayMapTypes.removeAt(idx)}
   const tileSource=new ee.layers.EarthEngineTileSource(mapId);
   overlay=new ee.layers.ImageOverlay(tileSource);
@@ -401,6 +661,7 @@ function showRenderError(err,meta){
 }
 async function renderLayer(){
   if(!connected)return;
+  if(rawAbortController){rawAbortController.abort();rawAbortController=null}
   const requestId=++renderSeq;
   let meta=captureSelection();
   updateValidTime();updateCompareHint();
@@ -411,6 +672,7 @@ async function renderLayer(){
   if(meta.product==='precip'&&!isAccumulationAvailable(meta.accumHours,meta.fh)){
     setLoading(false);showMessage('QPF accumulation unavailable',meta.accumHours+'-h QPF requires every hourly forecast in the accumulation window.',false);return;
   }
+  if(isRawProduct(meta.product)){await renderRawLayer(requestId,meta);return}
   setLoading(true,meta.comparison?'Building run-difference layer…':'Building WeatherNext layer…');
   try{
     meta=await resolveComparison(meta);
@@ -513,6 +775,7 @@ function syncPointActions(){
   els.trendBtn.title=meta?.comparison?'Run trend is available outside comparison mode.':(meta?.product==='precip'?'Run trend is focused on instantaneous scalar fields.':'');
 }
 function samplePoint(lat,lng){
+  if(currentLayerMeta?.raw){sampleRawPoint(lat,lng);return}
   if(!currentImage||!currentLayerMeta)return;
   markSelectedPoint(lat,lng);
   const requestId=++sampleSeq,image=currentImage,meta={...currentLayerMeta};
@@ -669,7 +932,7 @@ function closeAnalysis(){
 function selectProduct(name){
   currentProduct=name;document.querySelectorAll('.product').forEach(b=>b.classList.toggle('active',b.dataset.product===name));
   els.precipControls.classList.toggle('hidden',name!=='precip');els.probControls.classList.toggle('hidden',name!=='qpfprob');
-  syncStatControl();syncComparisonControls();renderLayer();
+  syncStatControl();syncComparisonControls();syncRawControls();renderLayer();
 }
 
 els.settingsBtn.onclick=openSetup;els.messageSetupBtn.onclick=openSetup;
@@ -678,12 +941,16 @@ els.clearConfigBtn.onclick=()=>{localStorage.removeItem(CONFIG_KEY);fillConfig()
 els.homeBtn.onclick=()=>map&&map.setOptions({center:LIX_CENTER,zoom:LIX_ZOOM});
 els.refreshBtn.onclick=renderLayer;
 els.runSelect.onchange=()=>{populateCompareRuns();loadForecastHours(true)};
-els.fhRange.oninput=()=>{renderSeq++;setLoading(false);const fh=getSelectedForecastHour();if(fh!=null)els.fhNumber.value=String(fh);updateValidTime();updateAccumulationAvailability();updateCompareHint()};
+els.fhRange.oninput=()=>{renderSeq++;if(rawAbortController)rawAbortController.abort();setLoading(false);const fh=getSelectedForecastHour();if(fh!=null)els.fhNumber.value=String(fh);updateValidTime();updateAccumulationAvailability();updateCompareHint();syncRawControls()};
 els.fhRange.onchange=renderLayer;
 els.fhNumber.onchange=()=>{setForecastHour(els.fhNumber.value);renderLayer()};
 els.statSelect.onchange=()=>{syncComparisonControls();renderLayer()};
-els.opacityRange.oninput=()=>overlay&&overlay.setOpacity(parseFloat(els.opacityRange.value));
+els.opacityRange.oninput=()=>{
+  const opacity=parseFloat(els.opacityRange.value);if(overlay)overlay.setOpacity(opacity);if(rawGroundOverlay)rawGroundOverlay.setOpacity(opacity);
+  if(rawDataLayer)rawDataLayer.setStyle(feature=>{const level=Number(feature.getProperty('height_dam')),major=Math.abs(level%6)<0.01;return {strokeColor:major?'#7ee7ff':'#d7f4ff',strokeWeight:major?2.3:1.15,strokeOpacity:(major?0.95:0.68)*opacity,clickable:false}})
+};
 els.qpfThreshold.onchange=renderLayer;
+els.rawQpfMode.onchange=()=>{syncRawControls();renderLayer()};els.rawAccum.onchange=renderLayer;els.rawThreshold.onchange=renderLayer;
 els.compareToggle.onchange=()=>{syncComparisonControls();renderLayer()};
 els.compareRun.onchange=renderLayer;els.compareMode.onchange=()=>{updateCompareHint();renderLayer()};
 els.readoutClose.onclick=()=>els.pointReadout.classList.add('hidden');

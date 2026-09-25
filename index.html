@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="styles.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/earthengine/0.1.419/earthengine-api.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -78,7 +79,9 @@
           <button class="product" data-product="wind"><b>10-m Wind</b><small>kt</small></button>
           <button class="product" data-product="precip"><b>QPF</b><small>inches</small></button>
           <button class="product" data-product="mslp"><b>MSLP</b><small>hPa</small></button>
-          <button class="product" data-product="qpfprob"><b>QPF Prob. Range</b><small>1-h threshold</small></button>
+          <button class="product" data-product="qpfprob"><b>QPF Prob. Range</b><small>EE brackets</small></button>
+          <button class="product raw-product" data-product="h500"><b>500-mb Height</b><small>raw GCS • dam</small></button>
+          <button class="product raw-product" data-product="rawqpf"><b>Raw QPF</b><small>exact 64 members</small></button>
         </div>
       </section>
 
@@ -103,6 +106,41 @@
         <p class="microcopy">Probability is shown as a range inferred directly from WN3 P10/P25/P50/P75/P90 fields. It is not an invented exact percentage.</p>
       </section>
 
+      <section id="rawControls" class="panel raw-panel hidden">
+        <div class="panel-title">Raw full ensemble</div>
+        <div id="rawAuthStatus" class="raw-auth-status">Backend sign-in status —</div>
+        <div id="rawSignInButton" class="raw-signin"></div>
+        <div id="rawQpfControls" class="hidden">
+          <label>Raw QPF diagnostic
+            <select id="rawQpfMode">
+              <option value="probability">Exact exceedance probability</option>
+              <option value="p10">True accumulated P10</option>
+              <option value="p25">True accumulated P25</option>
+              <option value="p50">True accumulated P50</option>
+              <option value="p75">True accumulated P75</option>
+              <option value="p90">True accumulated P90</option>
+            </select>
+          </label>
+          <label>Accumulation
+            <select id="rawAccum">
+              <option value="6">6 h</option>
+              <option value="12">12 h</option>
+              <option value="24" selected>24 h</option>
+            </select>
+          </label>
+          <label id="rawThresholdRow">Exceedance threshold
+            <select id="rawThreshold">
+              <option value="0.25">0.25 in</option>
+              <option value="0.50">0.50 in</option>
+              <option value="1.00" selected>1.00 in</option>
+              <option value="2.00">2.00 in</option>
+              <option value="3.00">3.00 in</option>
+            </select>
+          </label>
+        </div>
+        <p class="microcopy">Raw products use the Cloud Run backend and all 64 WeatherNext members. 500-mb height uses the native 0.25° pressure-level grid.</p>
+      </section>
+
       <section class="panel">
         <div class="panel-title">Display</div>
         <label>Layer opacity
@@ -115,8 +153,8 @@
       </section>
 
       <section class="panel science-note">
-        <div class="panel-title">Earth Engine phase</div>
-        <p>Surface maps, percentile spreads, run differences, point meteograms, and run trends use Earth Engine summary statistics. Raw members and pressure-level fields remain reserved for the later GCS/Zarr phase.</p>
+        <div class="panel-title">Hybrid data path</div>
+        <p>Earth Engine remains the fast path for surface statistics. 500-mb height and exact/true accumulated-QPF diagnostics use the regional Cloud Run + raw GCS/Zarr path.</p>
       </section>
     </aside>
 
@@ -178,6 +216,9 @@
       <label>Google Maps JavaScript API key
         <input id="mapsKey" autocomplete="off" placeholder="AIza…" required>
       </label>
+      <label>Phase 3 Cloud Run backend URL
+        <input id="backendUrl" type="url" autocomplete="off" placeholder="https://weathernext3-backend-…run.app">
+      </label>
       <div class="setup-help">
         <b>Cloud setup checklist</b>
         <ol>
@@ -186,6 +227,7 @@
           <li>OAuth Web Client origin includes <code>https://mefferso.github.io</code>.</li>
           <li>Maps JavaScript API key is restricted to this GitHub Pages site.</li>
           <li>Sign in with the same Google account approved for WeatherNext.</li>
+          <li>For raw Phase 3 products, deploy the Cloud Run backend and paste its HTTPS URL above.</li>
         </ol>
       </div>
       <div class="dialog-actions">
@@ -199,6 +241,6 @@
   <footer>
     Experimental model guidance — not an official NWS forecast or warning. Historical WeatherNext data is CC BY 4.0; real-time data is subject to Google DeepMind WeatherNext experimental terms.
   </footer>
-  <script src="app.js?v=20260925-phase2"></script>
+  <script src="app.js?v=20260925-phase3"></script>
 </body>
 </html>
