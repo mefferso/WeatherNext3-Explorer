@@ -46,7 +46,8 @@ Enter the Cloud project ID, OAuth Client ID, and Maps API key in the Explorer's 
 
 - WeatherNext 3 0.1° surface output is roughly 11 km.
 - Synoptic 00/06/12/18 UTC initializations extend to 360 h; interim hourly initializations extend to 48 h.
-- Multi-hour QPF sums hourly **ensemble-mean** precipitation. The UI locks the statistic to Mean because summing hourly percentiles does not produce the percentile of the accumulated distribution.
+- Forecast-hour controls are populated from the actual `forecast_hour` images available for the selected run rather than assuming a complete horizon.
+- Multi-hour QPF sums hourly **ensemble-mean** precipitation only when every hour in the requested accumulation window is available. The UI locks the statistic to Mean because summing hourly percentiles does not produce the percentile of the accumulated distribution.
 - Click the map for a point sample of the currently displayed field.
 
 ## Data / attribution
