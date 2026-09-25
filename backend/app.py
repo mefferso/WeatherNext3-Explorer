@@ -79,7 +79,7 @@ class ApiError(Exception):
 @app.exception_handler(ApiError)
 def api_error_handler(_: Request, exc: ApiError):
     from fastapi.responses import JSONResponse
-    return JSONResponse(exc.status_code, {"error": {"code": exc.code, "message": exc.message}})
+    return JSONResponse(status_code=exc.status_code, content={"error": {"code": exc.code, "message": exc.message}})
 
 
 @app.middleware("http")
@@ -95,7 +95,7 @@ async def rate_limit(request: Request, call_next):
             q.popleft()
         if len(q) >= RATE_LIMIT_PER_MINUTE:
             from fastapi.responses import JSONResponse
-            return JSONResponse(429, {"error": {"code": "rate_limited", "message": "Raw-backend request rate limit exceeded."}})
+            return JSONResponse(status_code=429, content={"error": {"code": "rate_limited", "message": "Raw-backend request rate limit exceeded."}})
         q.append(now)
     return await call_next(request)
 
