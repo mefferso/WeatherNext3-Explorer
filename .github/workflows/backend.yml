@@ -31,6 +31,8 @@ jobs:
         run: python -m pytest -q
       - name: Compile backend
         run: python -m py_compile backend/app.py
+      - name: Build backend container
+        run: docker build -t weathernext3-backend:test backend
 
   deploy:
     needs: test
@@ -70,5 +72,8 @@ jobs:
             --timeout=300 \
             --set-env-vars=GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_OAUTH_CLIENT_ID=${{ vars.WN3_OAUTH_CLIENT_ID }},ALLOWED_ORIGINS=https://mefferso.github.io,REQUIRE_ID_TOKEN=true,BUILD_SHA=${{ github.sha }} \
             --set-secrets=ALLOWED_EMAILS=WN3_ALLOWED_EMAILS:latest
-      - name: Show service URL
-        run: gcloud run services describe weathernext3-backend --project=${{ vars.GCP_PROJECT_ID }} --region=us-east1 --format='value(status.url)'
+      - name: Verify deployed health endpoint
+        run: |
+          SERVICE_URL="$(gcloud run services describe weathernext3-backend --project=${{ vars.GCP_PROJECT_ID }} --region=us-east1 --format='value(status.url)')"
+          echo "Cloud Run URL: ${SERVICE_URL}"
+          curl --fail --show-error --silent --retry 4 --retry-delay 3 "${SERVICE_URL}/health"
