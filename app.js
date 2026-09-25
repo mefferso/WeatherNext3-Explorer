@@ -89,7 +89,7 @@ function spreadLabel(stat){return stat==='spread_iqr'?'P75–P25 percentile spre
 function supportsSpread(product){return ['temp','dewpoint','wind','mslp'].includes(product)}
 function canCompare(product){return product!=='qpfprob'}
 function canMeteogram(meta){return meta&&['temp','dewpoint','wind','mslp','precip'].includes(meta.product)&&!meta.comparison}
-function canTrend(meta){return meta&&['temp','dewpoint','wind','mslp'].includes(meta.product)&&!meta.comparison}
+function canTrend(meta){return meta&&['temp','dewpoint','wind','mslp','precip'].includes(meta.product)&&!meta.comparison}
 function convertRaw(product,v){
   if(v==null||!Number.isFinite(Number(v)))return null;
   const n=Number(v);
@@ -601,7 +601,22 @@ async function openMeteogram(){
   }catch(err){if(requestId===analysisSeq)analysisFail(err)}
 }
 function trendCollection(meta,point,targetValid){
-  const p=PRODUCTS[meta.product],start=new Date(targetValid.getTime()),end=new Date(targetValid.getTime()+60000);
+  const p=PRODUCTS[meta.product];
+  if(meta.product==='precip'&&meta.accumHours>1){
+    const candidates=availableRuns.slice(0,24).map(run=>{
+      const fh=(targetValid.getTime()-new Date(run).getTime())/3600000;
+      return {run,fh};
+    }).filter(x=>Number.isInteger(x.fh)&&x.fh>=meta.accumHours);
+    return ee.FeatureCollection(candidates.map(x=>{
+      const startFh=x.fh-meta.accumHours+1;
+      const window=baseRunCollection(x.run).filter(ee.Filter.gte('forecast_hour',startFh)).filter(ee.Filter.lte('forecast_hour',x.fh));
+      const summed=p.transform(window.select(p.band+'_mean').sum()).rename('value');
+      const sampled=summed.reduceRegion({reducer:ee.Reducer.first(),geometry:point,scale:11132,bestEffort:true,maxPixels:1e6}).get('value');
+      const value=ee.Algorithms.If(window.size().eq(meta.accumHours),sampled,null);
+      return ee.Feature(null,{value}).set('start_time',x.run).set('forecast_hour',x.fh);
+    }));
+  }
+  const start=new Date(targetValid.getTime()),end=new Date(targetValid.getTime()+60000);
   const collection=ee.ImageCollection(DATASET).filterDate(ee.Date(start.getTime()),ee.Date(end.getTime())).filter(ee.Filter.inList('start_time',availableRuns.slice(0,24))).sort('start_time');
   const list=collection.toList(collection.size());
   let bands;
@@ -617,7 +632,8 @@ function trendCollection(meta,point,targetValid){
 async function openRunTrend(){
   if(!selectedPoint||!currentLayerMeta||!canTrend(currentLayerMeta))return;
   const requestId=++analysisSeq,meta={...currentLayerMeta},p=PRODUCTS[meta.product],targetValid=currentValidDate(meta.run,meta.fh);
-  analysisState('Run-over-run point trend','Valid '+formatValid(targetValid)+' • '+p.title+' • '+meta.statLabel+' • '+selectedPoint.lat.toFixed(3)+', '+selectedPoint.lng.toFixed(3));
+  const trendLabel=meta.product==='precip'&&meta.accumHours>1?meta.accumHours+'-h ensemble-mean QPF':meta.statLabel;
+  analysisState('Run-over-run point trend','Valid '+formatValid(targetValid)+' • '+p.title+' • '+trendLabel+' • '+selectedPoint.lat.toFixed(3)+', '+selectedPoint.lng.toFixed(3));
   try{
     if(typeof Chart==='undefined')throw new Error('Chart library did not load.');
     const point=ee.Geometry.Point([selectedPoint.lng,selectedPoint.lat]),result=await evaluatePromise(trendCollection(meta,point,targetValid));
@@ -627,6 +643,7 @@ async function openRunTrend(){
     if(!rows.length)throw new Error('No recent runs were available for this valid time.');
     const b=p.band;
     const values=rows.map(r=>{
+      if(meta.product==='precip'&&meta.accumHours>1)return r.value==null?null:Number(r.value);
       if(isSpreadStat(meta.stat)){
         const low=meta.stat==='spread_iqr'?'p25':'p10',high=meta.stat==='spread_iqr'?'p75':'p90';
         const hi=convertRaw(meta.product,r[b+'_'+high]),lo=convertRaw(meta.product,r[b+'_'+low]);
@@ -639,7 +656,7 @@ async function openRunTrend(){
     els.analysisLoading.classList.add('hidden');
     analysisChart=new Chart(els.analysisCanvas.getContext('2d'),{
       type:'line',
-      data:{labels,datasets:[{label:p.title+' • '+meta.statLabel,data:values,borderColor:'#6ee7c7',backgroundColor:'rgba(110,231,199,.18)',pointBackgroundColor:'#f5f8ff',pointRadius:3,borderWidth:2,tension:0.15}]},
+      data:{labels,datasets:[{label:p.title+' • '+trendLabel,data:values,borderColor:'#6ee7c7',backgroundColor:'rgba(110,231,199,.18)',pointBackgroundColor:'#f5f8ff',pointRadius:3,borderWidth:2,tension:0.15}]},
       options
     });
   }catch(err){if(requestId===analysisSeq)analysisFail(err)}
