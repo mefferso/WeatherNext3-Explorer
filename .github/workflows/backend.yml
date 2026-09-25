@@ -27,7 +27,8 @@ jobs:
         working-directory: backend
         env:
           REQUIRE_ID_TOKEN: "false"
-        run: pytest -q
+          PYTHONPATH: "."
+        run: python -m pytest -q
       - name: Compile backend
         run: python -m py_compile backend/app.py
 
