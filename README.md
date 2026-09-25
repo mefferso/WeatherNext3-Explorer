@@ -37,14 +37,16 @@ Earth Engine map IDs are displayed in Leaflet with `ee.data.getTileUrl()`.
 
 ## Display design
 
-Operational display scales remain fixed across forecast hours and model runs.
+**Auto / Dynamic** is the default color-scale mode. It uses robust statistics from the current map viewport so modest meteorological gradients use much more of the available palette instead of being compressed into a broad national-scale range.
 
-- QPF uses discrete operational thresholds and masks values below trace.
-- Wind uses fixed bins extending beyond 45 kt.
-- MSLP uses a fixed 940–1040 hPa fill with approximate 4-hPa contour edges.
-- Temperature and dewpoint retain fixed continuous scales to preserve spatial gradients.
-- Run differences use symmetric diverging scales centered on zero.
-- Percentile-spread products are explicitly labeled as percentile ranges, not standard deviation.
+- Temperature, dewpoint, wind, and MSLP use viewport P2–P98 bounds with product-specific minimum spans and sensible rounding.
+- Percentile-spread products use 0 to the viewport P98 spread.
+- Run differences use a symmetric scale centered on zero based on the viewport P98 absolute difference.
+- QPF keeps discrete meteorological bins, but Auto mode dynamically chooses a tighter set of thresholds appropriate to the precipitation magnitude in the current viewport.
+- The quantile-derived QPF probability product remains categorical because its probability brackets are the actual data representation.
+- Panning or zooming refreshes an Auto-scale layer after a short debounce.
+- **Fixed / Operational** remains available for apples-to-apples run/FH comparisons and retains the original stable scales.
+- The current scale and numeric range are shown in the legend and persistent layer-status header.
 
 ## Probability limitation
 

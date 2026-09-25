@@ -107,6 +107,13 @@
 
       <section class="panel">
         <div class="panel-title">Display</div>
+        <label>Color scale
+          <select id="scaleMode">
+            <option value="auto" selected>Auto / Dynamic</option>
+            <option value="fixed">Fixed / Operational</option>
+          </select>
+        </label>
+        <p class="microcopy">Auto stretches colors to the current map view using robust percentiles so local gradients stand out. Fixed keeps the same scale across runs and forecast hours.</p>
         <label>Layer opacity
           <input id="opacityRange" type="range" min="0" max="1" value="0.78" step="0.05">
         </label>
@@ -198,6 +205,6 @@
   <footer>
     Experimental model guidance — not an official NWS forecast or warning. Historical WeatherNext data is CC BY 4.0; real-time data is subject to Google DeepMind WeatherNext experimental terms.
   </footer>
-  <script src="app.js?v=20260925-zero-cost"></script>
+  <script src="app.js?v=20260925-dynamic-scale"></script>
 </body>
 </html>

@@ -8,6 +8,8 @@ const LIX_ZOOM=7;
 const MAX_LAYER_CACHE=20;
 const MAX_TREND_RUNS=16;
 const RUN_HOURS_CACHE_MS=120000;
+const MAX_AUTO_SCALE_CACHE=60;
+const AUTO_SCALE_DEBOUNCE_MS=450;
 
 const palettes={
   temp:['#4b0082','#3521b5','#2456d4','#1f8be0','#37b8df','#70d4c3','#a8df91','#e5e873','#ffd34e','#ffab43','#f47a3e','#e54735','#b5152c'],
@@ -27,6 +29,10 @@ const WIND_THRESHOLDS=[0,5,10,15,20,25,30,35,40,50,64,80];
 const WIND_LABELS=['0–5','5–10','10–15','15–20','20–25','25–30','30–35','35–40','40–50','50–64','64–80','80+'];
 const SPREAD_MAX={temp:30,dewpoint:30,wind:40,mslp:20};
 const DIFF_RANGE={temp:20,dewpoint:20,wind:30,precip:5,mslp:30};
+const AUTO_MIN_SPAN={temp:10,dewpoint:10,wind:10,mslp:8,precip:0.10};
+const AUTO_SPREAD_MIN_MAX={temp:4,dewpoint:4,wind:5,mslp:2};
+const AUTO_DIFF_MIN_RANGE={temp:3,dewpoint:3,wind:3,mslp:2,precip:0.10};
+const QPF_AUTO_LADDER=[0.001,0.01,0.03,0.05,0.075,0.10,0.15,0.20,0.25,0.35,0.50,0.75,1.00,1.50,2.00,3.00,5.00,7.00,10.00];
 
 const PRODUCTS={
   temp:{title:'2-m Temperature',unit:'°F',band:'temperature_2m',min:0,max:110,transform:i=>i.subtract(273.15).multiply(9/5).add(32)},
@@ -40,9 +46,11 @@ const PRODUCTS={
 let cfg=null,map=null,overlay=null,currentProduct='temp',currentImage=null,currentLayerMeta=null,accumHours=1,connected=false;
 let availableRuns=[],availableForecastHours=[],availableForecastHourSet=new Set();
 let renderSeq=0,forecastHourSeq=0,sampleSeq=0,analysisSeq=0;
-let selectedPoint=null,pointMarker=null,analysisChart=null;
+let selectedPoint=null,pointMarker=null,analysisChart=null,currentDisplay=null;
+let scaleMode='auto',autoScaleMoveTimer=null;
 const runHoursCache=new Map();
 const layerCache=new Map();
+const autoScaleCache=new Map();
 
 const $=id=>document.getElementById(id);
 const els={
@@ -51,7 +59,7 @@ const els={
   runSelect:$('runSelect'),fhRange:$('fhRange'),fhNumber:$('fhNumber'),validTime:$('validTime'),statSelect:$('statSelect'),
   compareToggle:$('compareToggle'),compareControls:$('compareControls'),compareRun:$('compareRun'),compareMode:$('compareMode'),compareHint:$('compareHint'),
   refreshBtn:$('refreshBtn'),homeBtn:$('homeBtn'),precipControls:$('precipControls'),probControls:$('probControls'),
-  qpfThreshold:$('qpfThreshold'),opacityRange:$('opacityRange'),loading:$('loading'),message:$('message'),
+  qpfThreshold:$('qpfThreshold'),opacityRange:$('opacityRange'),scaleMode:$('scaleMode'),loading:$('loading'),message:$('message'),
   messageSetupBtn:$('messageSetupBtn'),layerStatus:$('layerStatus'),
   legend:$('legend'),legendTitle:$('legendTitle'),legendGradient:$('legendGradient'),legendDiscrete:$('legendDiscrete'),
   legendLabels:$('legendLabels'),legendMin:$('legendMin'),legendMid:$('legendMid'),legendMax:$('legendMax'),legendNote:$('legendNote'),
@@ -110,6 +118,11 @@ function initMap(){
     attribution:'&copy; OpenStreetMap contributors'
   }).addTo(map);
   map.on('click',e=>samplePoint(e.latlng.lat,e.latlng.lng));
+  map.on('moveend',()=>{
+    if(scaleMode!=='auto'||!connected||!currentLayerMeta)return;
+    clearTimeout(autoScaleMoveTimer);
+    autoScaleMoveTimer=setTimeout(()=>renderLayer(),AUTO_SCALE_DEBOUNCE_MS);
+  });
 }
 
 function authenticate(){
@@ -324,32 +337,171 @@ function diffRange(meta){
   if(isSpreadStat(meta.stat))return Math.max(5,(SPREAD_MAX[meta.product]||20)/2);
   return DIFF_RANGE[meta.product]||20;
 }
-function prepareDisplay(meta,dataImage){
+function currentMapGeometry(){
+  const b=map?.getBounds();if(!b)throw new Error('Map bounds are not ready.');
+  return ee.Geometry.Rectangle([b.getWest(),b.getSouth(),b.getEast(),b.getNorth()],null,false);
+}
+function viewportKey(){
+  const b=map?.getBounds();if(!b)return 'no-bounds';
+  const q=v=>(Math.round(v*4)/4).toFixed(2);
+  return [q(b.getWest()),q(b.getSouth()),q(b.getEast()),q(b.getNorth())].join(',');
+}
+function autoScaleCacheKey(meta,kind){
+  return JSON.stringify([kind,meta.run,meta.fh,meta.product,meta.stat,meta.accumHours,meta.thresholdIn,meta.comparison,meta.compareRun,meta.compareMode,meta.compareFh,viewportKey()]);
+}
+function cacheAutoScale(key,value){
+  if(autoScaleCache.has(key))autoScaleCache.delete(key);
+  autoScaleCache.set(key,value);
+  while(autoScaleCache.size>MAX_AUTO_SCALE_CACHE)autoScaleCache.delete(autoScaleCache.keys().next().value);
+}
+function niceStep(meta){
+  if(meta.product==='temp'||meta.product==='dewpoint')return isSpreadStat(meta.stat)?1:2;
+  if(meta.product==='wind')return isSpreadStat(meta.stat)?1:2;
+  if(meta.product==='mslp')return 1;
+  if(meta.product==='precip')return 0.05;
+  return 1;
+}
+function floorTo(v,step){return Math.floor(v/step)*step}
+function ceilTo(v,step){return Math.ceil(v/step)*step}
+function ensureSpan(min,max,minSpan){
+  if(max-min>=minSpan)return {min,max};
+  const mid=(min+max)/2,half=minSpan/2;
+  return {min:mid-half,max:mid+half};
+}
+function samplePalette(palette,count){
+  if(count<=1)return [palette[Math.floor(palette.length/2)]];
+  return Array.from({length:count},(_,i)=>palette[Math.round(i*(palette.length-1)/(count-1))]);
+}
+function dynamicQpfThresholds(upper){
+  const target=Math.max(0.03,Number(upper)||0.03);
+  let candidates=QPF_AUTO_LADDER.filter(v=>v<=target*1.08);
+  const next=QPF_AUTO_LADDER.find(v=>v>target*1.08);
+  if(next)candidates.push(next);
+  if(candidates.length<5)candidates=QPF_AUTO_LADDER.slice(0,Math.max(5,QPF_AUTO_LADDER.indexOf(next)+1));
+  if(candidates.length>10){
+    const keep=[0,1];
+    const interior=candidates.length-3,slots=7;
+    for(let i=1;i<=slots;i++)keep.push(1+Math.round(i*interior/(slots+1)));
+    keep.push(candidates.length-1);
+    candidates=[...new Set(keep)].map(i=>candidates[i]).filter(Number.isFinite);
+  }
+  return candidates.slice(0,10);
+}
+function qpfLabels(thresholds){
+  return thresholds.map((v,i)=>{
+    const fmt=x=>x<0.01?x.toFixed(3):x<1?x.toFixed(2):x.toFixed(1);
+    return i<thresholds.length-1?fmt(v)+'–'+fmt(thresholds[i+1]):fmt(v)+'+';
+  });
+}
+async function reduceAutoStats(image,meta,mode){
+  const key=autoScaleCacheKey(meta,mode),cached=autoScaleCache.get(key);
+  if(cached)return cached;
+  let target=image,reducer;
+  if(mode==='difference'){
+    target=image.abs();reducer=ee.Reducer.percentile([98]);
+  }else if(mode==='spread'){
+    target=image.updateMask(image.gt(0));reducer=ee.Reducer.percentile([98]);
+  }else if(mode==='qpf'){
+    target=image.updateMask(image.gte(0.001));reducer=ee.Reducer.percentile([5,98]);
+  }else reducer=ee.Reducer.percentile([2,98]);
+  const stats=await evaluatePromise(target.reduceRegion({
+    reducer,geometry:currentMapGeometry(),scale:11132,bestEffort:true,maxPixels:1e7,tileScale:2
+  }));
+  const out={};
+  for(const [k,v] of Object.entries(stats||{}))if(Number.isFinite(Number(v)))out[k]=Number(v);
+  if(!Object.keys(out).length)throw new Error('No finite values were available for dynamic scaling.');
+  cacheAutoScale(key,out);return out;
+}
+function percentileValue(stats,suffix){
+  const key=Object.keys(stats).find(k=>k.endsWith(suffix));
+  return key?Number(stats[key]):NaN;
+}
+async function autoContinuousRange(image,meta){
+  const stats=await reduceAutoStats(image,meta,'continuous');
+  let min=percentileValue(stats,'_p2'),max=percentileValue(stats,'_p98');
+  if(!Number.isFinite(min)||!Number.isFinite(max)||max<=min)throw new Error('Invalid dynamic percentile range.');
+  ({min,max}=ensureSpan(min,max,AUTO_MIN_SPAN[meta.product]||4));
+  const pad=(max-min)*0.04;min-=pad;max+=pad;
+  const step=niceStep(meta);min=floorTo(min,step);max=ceilTo(max,step);
+  return {min,max};
+}
+async function autoDifferenceRange(image,meta){
+  const stats=await reduceAutoStats(image,meta,'difference');
+  let range=percentileValue(stats,'_p98');
+  if(!Number.isFinite(range)||range<=0)throw new Error('Invalid dynamic difference range.');
+  range=Math.max(range,AUTO_DIFF_MIN_RANGE[meta.product]||1);
+  range=ceilTo(range,niceStep(meta));
+  return range;
+}
+async function autoSpreadMax(image,meta){
+  const stats=await reduceAutoStats(image,meta,'spread');
+  let max=percentileValue(stats,'_p98');
+  if(!Number.isFinite(max)||max<=0)throw new Error('Invalid dynamic spread range.');
+  max=Math.max(max,AUTO_SPREAD_MIN_MAX[meta.product]||1);
+  return ceilTo(max,niceStep(meta));
+}
+async function autoQpfThresholds(image,meta){
+  const stats=await reduceAutoStats(image,meta,'qpf');
+  let upper=percentileValue(stats,'_p98');
+  if(!Number.isFinite(upper)||upper<=0)upper=0.10;
+  return dynamicQpfThresholds(upper);
+}
+function prepareFixedDisplay(meta,dataImage){
   if(meta.comparison){
     const range=diffRange(meta);
-    return {image:dataImage,vis:{min:-range,max:range,palette:palettes.difference},kind:'difference',range};
+    return {image:dataImage,vis:{min:-range,max:range,palette:palettes.difference},kind:'difference',range,scale:'fixed'};
   }
-  if(meta.product==='qpfprob')return {image:dataImage,vis:{min:0,max:5,palette:palettes.qpfprob},kind:'qpfprob'};
+  if(meta.product==='qpfprob')return {image:dataImage,vis:{min:0,max:5,palette:palettes.qpfprob},kind:'qpfprob',scale:'categorical'};
   if(meta.product==='precip'){
-    return {image:classifyThresholds(dataImage,QPF_THRESHOLDS,true),vis:{min:0,max:QPF_THRESHOLDS.length-1,palette:palettes.precip},kind:'qpf'};
+    return {image:classifyThresholds(dataImage,QPF_THRESHOLDS,true),vis:{min:0,max:QPF_THRESHOLDS.length-1,palette:palettes.precip},kind:'qpf',thresholds:QPF_THRESHOLDS,labels:QPF_LABELS,colors:palettes.precip,scale:'fixed'};
   }
   if(meta.product==='wind'&&!isSpreadStat(meta.stat)){
-    return {image:classifyThresholds(dataImage,WIND_THRESHOLDS,false),vis:{min:0,max:WIND_THRESHOLDS.length-1,palette:palettes.wind},kind:'wind'};
+    return {image:classifyThresholds(dataImage,WIND_THRESHOLDS,false),vis:{min:0,max:WIND_THRESHOLDS.length-1,palette:palettes.wind},kind:'wind',scale:'fixed'};
   }
   if(isSpreadStat(meta.stat)){
     const max=SPREAD_MAX[meta.product]||20;
-    return {image:dataImage,vis:{min:0,max,palette:palettes.spread},kind:'spread',max};
+    return {image:dataImage,vis:{min:0,max,palette:palettes.spread},kind:'spread',max,scale:'fixed'};
   }
   if(meta.product==='mslp'){
     const fill=dataImage.visualize({min:PRODUCTS.mslp.min,max:PRODUCTS.mslp.max,palette:palettes.mslp});
     const contourBands=dataImage.divide(4).floor();
     const edges=ee.Algorithms.CannyEdgeDetector(contourBands,0.1,0).selfMask();
     const contours=edges.visualize({palette:['#f7fafc'],opacity:0.55});
-    return {image:fill.blend(contours),vis:{},kind:'mslp'};
+    return {image:fill.blend(contours),vis:{},kind:'mslp',min:PRODUCTS.mslp.min,max:PRODUCTS.mslp.max,scale:'fixed'};
   }
   const p=PRODUCTS[meta.product];
-  return {image:dataImage,vis:{min:p.min,max:p.max,palette:palettes[meta.product]},kind:'continuous'};
+  return {image:dataImage,vis:{min:p.min,max:p.max,palette:palettes[meta.product]},kind:'continuous',min:p.min,max:p.max,scale:'fixed'};
 }
+async function prepareDisplay(meta,dataImage){
+  if(scaleMode!=='auto'||meta.product==='qpfprob')return prepareFixedDisplay(meta,dataImage);
+  try{
+    if(meta.comparison){
+      const range=await autoDifferenceRange(dataImage,meta);
+      return {image:dataImage,vis:{min:-range,max:range,palette:palettes.difference},kind:'difference',range,scale:'auto'};
+    }
+    if(meta.product==='precip'){
+      const thresholds=await autoQpfThresholds(dataImage,meta),colors=samplePalette(palettes.precip,thresholds.length);
+      return {image:classifyThresholds(dataImage,thresholds,true),vis:{min:0,max:thresholds.length-1,palette:colors},kind:'qpf',thresholds,labels:qpfLabels(thresholds),colors,scale:'auto'};
+    }
+    if(isSpreadStat(meta.stat)){
+      const max=await autoSpreadMax(dataImage,meta);
+      return {image:dataImage,vis:{min:0,max,palette:palettes.spread},kind:'spread',max,scale:'auto'};
+    }
+    const range=await autoContinuousRange(dataImage,meta);
+    if(meta.product==='mslp'){
+      const fill=dataImage.visualize({min:range.min,max:range.max,palette:palettes.mslp});
+      const contourBands=dataImage.divide(4).floor();
+      const edges=ee.Algorithms.CannyEdgeDetector(contourBands,0.1,0).selfMask();
+      const contours=edges.visualize({palette:['#f7fafc'],opacity:0.62});
+      return {image:fill.blend(contours),vis:{},kind:'mslp',min:range.min,max:range.max,scale:'auto'};
+    }
+    return {image:dataImage,vis:{min:range.min,max:range.max,palette:palettes[meta.product]},kind:'continuous',min:range.min,max:range.max,scale:'auto'};
+  }catch(err){
+    console.warn('Dynamic scale failed; using fixed scale.',err);
+    return {...prepareFixedDisplay(meta,dataImage),autoFallback:true};
+  }
+}
+
 async function resolveComparison(meta){
   if(!meta.comparison)return meta;
   if(!canCompare(meta.product))throw new Error('Run comparison is not supported for the bracketed QPF probability product.');
@@ -371,7 +523,9 @@ async function resolveComparison(meta){
   }
   return {...meta,compareFh,compareValid:currentValidDate(meta.compareRun,compareFh)};
 }
-function layerCacheKey(meta){return JSON.stringify([meta.run,meta.fh,meta.product,meta.stat,meta.accumHours,meta.thresholdIn,meta.comparison,meta.compareRun,meta.compareMode,meta.compareFh])}
+function layerCacheKey(meta,display){
+  return JSON.stringify([meta.run,meta.fh,meta.product,meta.stat,meta.accumHours,meta.thresholdIn,meta.comparison,meta.compareRun,meta.compareMode,meta.compareFh,display.scale,display.min,display.max,display.range,display.thresholds]);
+}
 function cacheMapId(key,mapId){
   if(layerCache.has(key))layerCache.delete(key);
   layerCache.set(key,mapId);
@@ -420,11 +574,13 @@ async function renderLayer(){
       const comparisonMeta={...meta,run:meta.compareRun,fh:meta.compareFh,comparison:false};
       dataImage=primary.subtract(buildFieldImage(comparisonMeta)).rename('value');
     }
-    const display=prepareDisplay(meta,dataImage),key=layerCacheKey(meta),cached=layerCache.get(key);
+    const display=await prepareDisplay(meta,dataImage);
+    if(requestId!==renderSeq)return;
+    const key=layerCacheKey(meta,display),cached=layerCache.get(key);
     const finish=mapId=>{
       if(requestId!==renderSeq)return;
-      installOverlay(mapId);currentImage=dataImage;currentLayerMeta={...meta};hideMessage();setLoading(false);
-      updateLegend(currentLayerMeta,display);updateLayerStatus(currentLayerMeta);syncPointActions();
+      installOverlay(mapId);currentImage=dataImage;currentLayerMeta={...meta};currentDisplay=display;hideMessage();setLoading(false);
+      updateLegend(currentLayerMeta,display);updateLayerStatus(currentLayerMeta,display);syncPointActions();
     };
     if(cached){finish(cached);return}
     display.image.getMap(display.vis,(mapId,err)=>{
@@ -448,49 +604,71 @@ function setGradientLegend(colors,min,mid,max){
   els.legendGradient.style.background='linear-gradient(90deg,'+colors.join(',')+')';
   els.legendMin.textContent=min;els.legendMid.textContent=mid;els.legendMax.textContent=max;
 }
-function updateLegend(meta=currentLayerMeta,display=meta?prepareDisplay(meta,currentImage):null){
+function formatScaleValue(v,product){
+  const n=Number(v);if(!Number.isFinite(n))return '—';
+  if(product==='precip')return n<0.1?n.toFixed(2):n<1?n.toFixed(2):n.toFixed(1);
+  if(product==='mslp')return n.toFixed(0);
+  return Math.abs(n)<10?n.toFixed(1):n.toFixed(0);
+}
+function scaleName(display){return display?.scale==='auto'?'Auto / dynamic':display?.scale==='categorical'?'Categorical':'Fixed / operational'}
+function updateLegend(meta=currentLayerMeta,display=currentDisplay){
   if(!meta||!display)return;
   const p=PRODUCTS[meta.product];els.legend.classList.remove('hidden');
   if(meta.comparison){
     const range=display.range||diffRange(meta);
     els.legendTitle.textContent='Run difference • '+p.title;
-    setGradientLegend(palettes.difference,'−'+range+' '+p.unit,'0','+'+range+' '+p.unit);
-    els.legendNote.textContent='Current run minus comparison run • symmetric fixed scale centered on zero.';
+    setGradientLegend(palettes.difference,'−'+formatScaleValue(range,meta.product)+' '+p.unit,'0','+'+formatScaleValue(range,meta.product)+' '+p.unit);
+    els.legendNote.textContent=scaleName(display)+' symmetric scale centered on zero'+(display.scale==='auto'?' • viewport 98th percentile |Δ|':'')+(display.autoFallback?' • auto fallback':'')+'.';
     return;
   }
   els.legendTitle.textContent=p.title+(meta.product==='precip'?' • '+meta.accumHours+' h':'')+(isSpreadStat(meta.stat)?' • '+spreadLabel(meta.stat):'');
   if(meta.product==='qpfprob'){
     setDiscreteLegend(palettes.qpfprob,PROBABILITY_LABELS);
-    els.legendNote.textContent='Bracketed probability of 1-h QPF > '+meta.thresholdIn.toFixed(2)+' in, inferred from published ensemble quantiles.';
+    els.legendNote.textContent='Categorical probability range • 1-h QPF > '+meta.thresholdIn.toFixed(2)+' in • inferred from published ensemble quantiles.';
   }else if(meta.product==='precip'){
-    setDiscreteLegend(palettes.precip,QPF_LABELS);
-    els.legendNote.textContent=(meta.accumHours>1?'ensemble mean • ':'')+'inches • values below trace are transparent';
-  }else if(meta.product==='wind'&&!isSpreadStat(meta.stat)){
+    setDiscreteLegend(display.colors||palettes.precip,display.labels||QPF_LABELS);
+    els.legendNote.textContent=scaleName(display)+' QPF bins • '+(meta.accumHours>1?'ensemble mean • ':'')+'inches • values below trace are transparent'+(display.autoFallback?' • auto fallback':'');
+  }else if(meta.product==='wind'&&display.kind==='wind'){
     setDiscreteLegend(palettes.wind,WIND_LABELS);
-    els.legendNote.textContent=meta.statLabel.toLowerCase()+' • kt • fixed operational bins';
+    els.legendNote.textContent='Fixed / operational wind bins • '+meta.statLabel.toLowerCase()+' • kt';
   }else if(isSpreadStat(meta.stat)){
-    const max=SPREAD_MAX[meta.product]||20;
-    setGradientLegend(palettes.spread,'0 '+p.unit,(max/2)+' '+p.unit,max+'+ '+p.unit);
-    els.legendNote.textContent=spreadLabel(meta.stat)+' • percentile range, not standard deviation';
+    const max=display.max||SPREAD_MAX[meta.product]||20;
+    setGradientLegend(palettes.spread,'0 '+p.unit,formatScaleValue(max/2,meta.product)+' '+p.unit,formatScaleValue(max,meta.product)+'+ '+p.unit);
+    els.legendNote.textContent=scaleName(display)+' • '+spreadLabel(meta.stat)+' • percentile range, not standard deviation'+(display.scale==='auto'?' • viewport P98 upper bound':'')+(display.autoFallback?' • auto fallback':'');
   }else{
-    setGradientLegend(palettes[meta.product],p.min+' '+p.unit,((p.min+p.max)/2).toFixed(0)+' '+p.unit,p.max+' '+p.unit);
+    const min=Number.isFinite(display.min)?display.min:p.min,max=Number.isFinite(display.max)?display.max:p.max;
+    setGradientLegend(palettes[meta.product],formatScaleValue(min,meta.product)+' '+p.unit,formatScaleValue((min+max)/2,meta.product)+' '+p.unit,formatScaleValue(max,meta.product)+' '+p.unit);
     const extra=meta.product==='mslp'?' • ~4-hPa contour edges':'';
-    els.legendNote.textContent=meta.statLabel.toLowerCase()+' • WeatherNext 3 0.1° (~11 km)'+extra;
+    els.legendNote.textContent=scaleName(display)+' • '+meta.statLabel.toLowerCase()+' • WeatherNext 3 0.1° (~11 km)'+(display.scale==='auto'?' • viewport P2–P98':'')+extra+(display.autoFallback?' • auto fallback':'');
   }
 }
-function layerStatusText(meta){
+function scaleStatus(meta,display){
+  if(!display)return '';
+  const p=PRODUCTS[meta.product];
+  if(display.scale==='categorical')return 'Categorical scale';
+  if(meta.comparison)return (display.scale==='auto'?'Auto':'Fixed')+' scale ±'+formatScaleValue(display.range,meta.product)+' '+p.unit;
+  if(meta.product==='precip'){
+    const last=display.thresholds?.[display.thresholds.length-1];
+    return (display.scale==='auto'?'Auto':'Fixed')+' QPF scale'+(Number.isFinite(last)?' to '+formatScaleValue(last,meta.product)+'+ '+p.unit:'');
+  }
+  if(isSpreadStat(meta.stat))return (display.scale==='auto'?'Auto':'Fixed')+' scale 0–'+formatScaleValue(display.max,meta.product)+' '+p.unit;
+  const min=Number.isFinite(display.min)?display.min:p.min,max=Number.isFinite(display.max)?display.max:p.max;
+  return (display.scale==='auto'?'Auto':'Fixed')+' scale '+formatScaleValue(min,meta.product)+'–'+formatScaleValue(max,meta.product)+' '+p.unit;
+}
+function layerStatusText(meta,display=currentDisplay){
   const p=PRODUCTS[meta.product],valid=currentValidDate(meta.run,meta.fh);
   let detail=meta.statLabel;
   if(meta.product==='precip')detail=meta.accumHours+'-h QPF • '+meta.statLabel;
   if(meta.product==='qpfprob')detail='QPF probability range > '+meta.thresholdIn.toFixed(2)+' in';
-  if(!meta.comparison)return formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • '+p.title+' • '+detail;
+  const scale=scaleStatus(meta,display);
+  if(!meta.comparison)return formatRun(meta.run)+' • '+formatForecastHour(meta.fh)+' • Valid '+formatValid(valid)+' • '+p.title+' • '+detail+(scale?' • '+scale:'');
   const field=p.title+' • '+meta.statLabel+' • Δ '+p.unit;
   if(meta.compareMode==='same_valid'){
-    return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' • Valid '+formatValid(valid)+' • Same valid time • '+field;
+    return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' • Valid '+formatValid(valid)+' • Same valid time • '+field+(scale?' • '+scale:'');
   }
-  return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' (Valid '+formatValid(valid)+') − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' (Valid '+formatValid(meta.compareValid)+') • Same forecast lead • '+field;
+  return 'Δ '+formatRun(meta.run)+' '+formatForecastHour(meta.fh)+' (Valid '+formatValid(valid)+') − '+formatRun(meta.compareRun)+' '+formatForecastHour(meta.compareFh)+' (Valid '+formatValid(meta.compareValid)+') • Same forecast lead • '+field+(scale?' • '+scale:'');
 }
-function updateLayerStatus(meta){els.layerStatus.textContent=layerStatusText(meta);els.layerStatus.classList.remove('muted')}
+function updateLayerStatus(meta,display=currentDisplay){els.layerStatus.textContent=layerStatusText(meta,display);els.layerStatus.classList.remove('muted')}
 
 function sampleMetaText(meta){
   if(meta.comparison)return layerStatusText(meta);
@@ -682,6 +860,7 @@ els.fhRange.onchange=renderLayer;
 els.fhNumber.onchange=()=>{setForecastHour(els.fhNumber.value);renderLayer()};
 els.statSelect.onchange=()=>{syncComparisonControls();renderLayer()};
 els.opacityRange.oninput=()=>overlay&&overlay.setOpacity(parseFloat(els.opacityRange.value));
+els.scaleMode.onchange=()=>{scaleMode=els.scaleMode.value;autoScaleCache.clear();renderLayer()};
 els.qpfThreshold.onchange=renderLayer;
 els.compareToggle.onchange=()=>{syncComparisonControls();renderLayer()};
 els.compareRun.onchange=renderLayer;els.compareMode.onchange=()=>{updateCompareHint();renderLayer()};
@@ -694,6 +873,7 @@ accumButtons().forEach(b=>b.onclick=()=>{
   syncStatControl();renderLayer();
 });
 
+scaleMode=els.scaleMode?.value||'auto';
 cfg=getSavedConfig();
 if(cfg?.projectId&&cfg?.clientId)authenticate();else openSetup();
 })();
